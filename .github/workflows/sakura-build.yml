@@ -8,6 +8,12 @@ on:
         description: "要构建的分支/标签"
         required: false
         default: "sakura/android-local-dns"
+  # 默认分支 testing 是上游镜像（同步时会被强制覆盖），所以工作流放在补丁分支上，
+  # 用 push 触发；workflow_dispatch 要等文件进了默认分支才能在 UI 上点到。
+  push:
+    branches:
+      - sakura/android-local-dns
+      - sakura/build-ci
 
 permissions:
   contents: read
