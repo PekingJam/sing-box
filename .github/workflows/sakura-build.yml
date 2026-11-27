@@ -1,0 +1,108 @@
+name: Sakura Build
+
+# 自编产物：android/arm64 + windows/amd64（纯 Go，无需 NDK / cgo）
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的分支/标签"
+        required: false
+        default: "sakura/android-local-dns"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'sakura/android-local-dns' }}
+          fetch-depth: 0
+      - name: Calculate version
+        id: version
+        run: |
+          TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$' | head -1)
+          [ -n "$TAG" ] || TAG=$(git describe --tags --always)
+          echo "version=${TAG}+$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android-arm64
+            goos: android
+            goarch: arm64
+            tags_file: release/DEFAULT_BUILD_TAGS_OTHERS
+            pie: true
+            binary: sing-box
+            archive: tar.gz
+          - platform: windows-amd64
+            goos: windows
+            goarch: amd64
+            tags_file: release/DEFAULT_BUILD_TAGS_WINDOWS
+            pie: false
+            binary: sing-box.exe
+            archive: zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'sakura/android-local-dns' }}
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAGS_FILE: ${{ matrix.tags_file }}
+        run: |
+          TAGS=$(cat "$TAGS_FILE")
+          LDFLAGS_SHARED=$(cat release/LDFLAGS)
+          mkdir -p dist
+          EXTRA=""
+          if [ "${{ matrix.pie }}" = "true" ]; then EXTRA="-buildmode=pie"; fi
+          go build -v -trimpath $EXTRA \
+            -tags "$TAGS" \
+            -ldflags "-s -w -X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED}" \
+            -o "dist/${{ matrix.binary }}" ./cmd/sing-box
+      - name: Package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          NAME="sing-box-${{ matrix.platform }}-${VERSION}"
+          SAFE=$(printf '%s' "$NAME" | tr -c '0-9A-Za-z._-' '.')
+          mkdir -p "dist/pkg"
+          cp "dist/${{ matrix.binary }}" "dist/pkg/${{ matrix.binary }}"
+          chmod 755 "dist/pkg/${{ matrix.binary }}"
+          cp LICENSE "dist/pkg/"
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czf "dist/pkg/${SAFE}.tar.gz" -C dist/pkg "${{ matrix.binary }}" LICENSE
+            mv "dist/pkg/${SAFE}.tar.gz" dist/
+          else
+            (cd dist/pkg && zip -q -X "../${SAFE}.zip" "${{ matrix.binary }}" LICENSE)
+          fi
+          cd dist && sha256sum *.tar.gz *.zip 2>/dev/null || true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/${{ matrix.binary }}
